@@ -116,6 +116,11 @@ docker compose logs -f
 - `BACKEND_CACHE_TTL_EST`：实时估值缓存秒数（默认 3）
 - `BACKEND_CACHE_TTL_NAV`：历史净值缓存秒数（默认 3600）
 - `BACKEND_WATCH_CODES`：预热/收盘任务基金列表（逗号分隔）
+- `TUSHARE_TOKEN`：Tushare Pro Token（可选）
+- `XUEQIU_COOKIE`：雪球 Cookie（可选，用于估值）
+- `JOINQUANT_TOKEN`：JoinQuant Token（占位，可选）
+- `RICEQUANT_TOKEN`：RiceQuant Token（占位，可选）
+- `AKSHARE_ENABLED`：是否启用 AkShare（`0/1`，可选）
 
 ## 接口
 
@@ -126,7 +131,7 @@ docker compose logs -f
 - `GET /api/data/source-list`
 - `GET /api/trade/status`
 
-备注：当前实现为多数据源架构骨架，已可返回估值、历史净值和均线，后续可接入 AkShare/Tushare/雪球/聚宽等源。
+备注：已支持 fundgz、eastmoney、pingzhong 以及可选的 tushare / xueqiu / akshare；JoinQuant / RiceQuant 为占位。
 
 ## 定时任务
 
