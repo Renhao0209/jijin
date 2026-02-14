@@ -158,6 +158,100 @@ def ai_extract_holdings_from_ocr_lines(
     return out
 
 
+def ai_extract_holdings_from_image_base64(
+    image_base64: str,
+    *,
+    endpoint: str,
+    api_key: str,
+    model: str,
+    file_ext: str = "jpg",
+) -> List[Dict]:
+    ep = endpoint.strip()
+    key = api_key.strip()
+    m = model.strip() or "gpt-4o-mini"
+    if not ep or not key:
+        raise RuntimeError("AI 配置不完整")
+
+    raw = (image_base64 or "").strip()
+    if not raw:
+        raise RuntimeError("图片为空")
+    if "," in raw and "base64" in raw[:40]:
+        raw = raw.split(",", 1)[1]
+
+    ext = (file_ext or "jpg").lower().replace(".", "")
+    if ext == "jpg":
+        ext = "jpeg"
+    data_uri = f"data:image/{ext};base64,{raw}"
+
+    prompt = (
+        "你是一个信息抽取器。请从截图中提取基金持仓列表。"
+        "只输出严格JSON数组，不要解释。"
+        "每项字段: code(6位字符串), name(字符串), amount(数字，单位元)。"
+        "不要把收益/涨跌幅/占比/份额当作amount。"
+    )
+
+    body = {
+        "model": m,
+        "stream": False,
+        "temperature": 0,
+        "max_tokens": 1200,
+        "messages": [
+            {"role": "system", "content": "只输出JSON数组"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_uri}},
+                ],
+            },
+        ],
+    }
+
+    with httpx.Client(timeout=35) as client:
+        resp = client.post(
+            ep,
+            json=body,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise RuntimeError(f"AI接口错误: {resp.status_code}")
+    data = resp.json()
+    content = ""
+    try:
+        content = str(data.get("choices", [])[0].get("message", {}).get("content", ""))
+    except Exception:
+        content = ""
+    if not content:
+        raise RuntimeError("AI未返回可解析内容")
+
+    arr_text = _extract_json_array(content) or content.strip()
+    try:
+        arr = json.loads(arr_text)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("AI返回不是有效JSON数组") from exc
+    if not isinstance(arr, list):
+        raise RuntimeError("AI返回结构异常")
+
+    out: List[Dict] = []
+    seen = set()
+    for it in arr:
+        if not isinstance(it, dict):
+            continue
+        code = _extract_code(str(it.get("code") or ""))
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        name = str(it.get("name") or "").strip()
+        try:
+            amount = float(it.get("amount") or 0)
+        except Exception:
+            amount = 0
+        if (not math.isfinite(amount)) or amount <= 0:
+            continue
+        out.append({"code": code, "name": name, "amount": amount})
+    return out
+
+
 def ocr_lines_from_image_bytes(content: bytes, suffix: str = ".jpg") -> List[str]:
     try:
         from rapidocr_onnxruntime import RapidOCR  # type: ignore

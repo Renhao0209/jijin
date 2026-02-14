@@ -27,7 +27,12 @@ from .schemas import (
     SourceVerifyResponse,
     AiVerifyResponse,
 )
-from .importer import ai_extract_holdings_from_ocr_lines, ocr_holdings_from_image_bytes, ocr_lines_from_image_bytes
+from .importer import (
+    ai_extract_holdings_from_image_base64,
+    ai_extract_holdings_from_ocr_lines,
+    ocr_holdings_from_image_bytes,
+    ocr_lines_from_image_bytes,
+)
 from .config import TUSHARE_TOKEN, XUEQIU_COOKIE, JOINQUANT_TOKEN, RICEQUANT_TOKEN, AKSHARE_ENABLED
 from .services import (
     build_ma_line,
@@ -326,28 +331,45 @@ async def import_holdings_image_base64(
         raw = payload.imageBase64 or ""
         if "," in raw and "base64" in raw[:40]:
             raw = raw.split(",", 1)[1]
-        try:
-            content = base64.b64decode(raw)
-        except Exception:
-            return HoldingImportResponse(ok=False, message="imageBase64 不是有效的 base64", items=[])
 
-        lines = ocr_lines_from_image_bytes(content, suffix=f".{ext}")
         items = []
-        if payload.useAi and (x_mw_ai_endpoint or "").strip() and (x_mw_ai_key or "").strip():
+        if payload.useAi:
+            ep = (x_mw_ai_endpoint or "").strip()
+            key = (x_mw_ai_key or "").strip()
+            if not ep or not key:
+                return HoldingImportResponse(ok=False, message="AI配置不完整，请先在小程序设置中填写 endpoint/apiKey", items=[])
             try:
-                items = ai_extract_holdings_from_ocr_lines(
-                    lines,
-                    endpoint=(x_mw_ai_endpoint or "").strip(),
-                    api_key=(x_mw_ai_key or "").strip(),
+                items = ai_extract_holdings_from_image_base64(
+                    raw,
+                    endpoint=ep,
+                    api_key=key,
                     model=(x_mw_ai_model or "gpt-4o-mini").strip(),
+                    file_ext=ext,
                 )
+            except Exception as e:  # noqa: BLE001
+                return HoldingImportResponse(ok=False, message=f"AI识别失败: {e}", items=[])
+        else:
+            try:
+                content = base64.b64decode(raw)
             except Exception:
-                items = []
+                return HoldingImportResponse(ok=False, message="imageBase64 不是有效的 base64", items=[])
 
-        if not items:
-            from .importer import parse_holdings_from_ocr_lines
+            lines = ocr_lines_from_image_bytes(content, suffix=f".{ext}")
+            if (x_mw_ai_endpoint or "").strip() and (x_mw_ai_key or "").strip():
+                try:
+                    items = ai_extract_holdings_from_ocr_lines(
+                        lines,
+                        endpoint=(x_mw_ai_endpoint or "").strip(),
+                        api_key=(x_mw_ai_key or "").strip(),
+                        model=(x_mw_ai_model or "gpt-4o-mini").strip(),
+                    )
+                except Exception:
+                    items = []
 
-            items = parse_holdings_from_ocr_lines(lines)
+            if not items:
+                from .importer import parse_holdings_from_ocr_lines
+
+                items = parse_holdings_from_ocr_lines(lines)
 
         out = _normalize_import_items(items)
         return HoldingImportResponse(ok=True, message="", items=out)
