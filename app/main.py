@@ -325,6 +325,8 @@ async def import_holdings_image_base64(
     x_mw_ai_endpoint: str | None = Header(None),
     x_mw_ai_key: str | None = Header(None),
     x_mw_ai_model: str | None = Header(None),
+    x_mw_ai_json_repair: str | None = Header(None),
+    x_mw_ai_repair_rounds: str | None = Header(None),
 ):
     try:
         ext = (payload.fileExt or "jpg").strip().lower().replace(".", "")
@@ -333,6 +335,13 @@ async def import_holdings_image_base64(
         raw = payload.imageBase64 or ""
         if "," in raw and "base64" in raw[:40]:
             raw = raw.split(",", 1)[1]
+
+        json_repair_enabled = (x_mw_ai_json_repair or "1").strip() not in {"0", "false", "False"}
+        try:
+            repair_rounds = int((x_mw_ai_repair_rounds or "1").strip() or "1")
+        except Exception:
+            repair_rounds = 1
+        repair_rounds = max(0, min(repair_rounds, 3))
 
         items = []
         if payload.useAi:
@@ -347,6 +356,8 @@ async def import_holdings_image_base64(
                     api_key=key,
                     model=(x_mw_ai_model or "gpt-4o-mini").strip(),
                     file_ext=ext,
+                    enable_json_repair=json_repair_enabled,
+                    repair_rounds=repair_rounds,
                 )
             except Exception as e:  # noqa: BLE001
                 return HoldingImportResponse(ok=False, message=f"AI识别失败: {e}", items=[])
@@ -364,6 +375,8 @@ async def import_holdings_image_base64(
                         endpoint=(x_mw_ai_endpoint or "").strip(),
                         api_key=(x_mw_ai_key or "").strip(),
                         model=(x_mw_ai_model or "gpt-4o-mini").strip(),
+                        enable_json_repair=json_repair_enabled,
+                        repair_rounds=repair_rounds,
                     )
                 except Exception:
                     items = []

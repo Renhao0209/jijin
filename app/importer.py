@@ -112,12 +112,133 @@ def _extract_json_array(text: str) -> str | None:
     return None
 
 
+def _repair_json_array_with_ai(
+    raw_content: str,
+    *,
+    endpoint: str,
+    api_key: str,
+    model: str,
+) -> str:
+    ep = _normalize_ai_endpoint(endpoint)
+    key = (api_key or "").strip()
+    m = (model or "").strip() or "gpt-4o-mini"
+    if not ep or not key:
+        raise RuntimeError("AI 配置不完整")
+
+    prompt = (
+        "请把下面内容修复成严格JSON数组，只能输出数组本身，不要任何解释。\n"
+        "数组每项字段固定为: code(6位字符串), name(字符串), amount(数字)。\n"
+        "原始内容:\n"
+        f"{raw_content}"
+    )
+    body = {
+        "model": m,
+        "stream": False,
+        "temperature": 0,
+        "max_tokens": 1200,
+        "messages": [
+            {"role": "system", "content": "你是JSON修复器，只输出JSON数组"},
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    with httpx.Client(timeout=25) as client:
+        resp = client.post(
+            ep,
+            json=body,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise RuntimeError(_ai_error_message(resp))
+    data = resp.json()
+    content = ""
+    try:
+        content = str(data.get("choices", [])[0].get("message", {}).get("content", ""))
+    except Exception:
+        content = ""
+    if not content:
+        raise RuntimeError("AI二次修复未返回内容")
+    return (_extract_json_array(content) or content).strip()
+
+
+def _parse_ai_holdings_content(
+    content: str,
+    *,
+    endpoint: str,
+    api_key: str,
+    model: str,
+    enable_json_repair: bool = True,
+    repair_rounds: int = 1,
+) -> List[Dict]:
+    raw_text = (content or "").strip()
+    if not raw_text:
+        raise RuntimeError("AI未返回可解析内容")
+
+    arr_text = _extract_json_array(raw_text) or raw_text
+    arr = None
+    last_err: Exception | None = None
+
+    try:
+        parsed = json.loads(arr_text)
+        if isinstance(parsed, list):
+            arr = parsed
+        else:
+            raise RuntimeError("AI返回结构异常")
+    except Exception as exc:  # noqa: BLE001
+        last_err = exc
+
+    rounds = max(0, min(int(repair_rounds or 0), 3))
+    if arr is None and enable_json_repair and rounds > 0:
+        current = raw_text
+        for _ in range(rounds):
+            repaired = _repair_json_array_with_ai(
+                current,
+                endpoint=endpoint,
+                api_key=api_key,
+                model=model,
+            )
+            try:
+                parsed = json.loads(repaired)
+                if isinstance(parsed, list):
+                    arr = parsed
+                    break
+                current = repaired
+                last_err = RuntimeError("AI返回结构异常")
+            except Exception as exc:  # noqa: BLE001
+                current = repaired
+                last_err = exc
+
+    if arr is None:
+        raise RuntimeError("AI返回不是有效JSON数组") from last_err
+
+    out: List[Dict] = []
+    seen = set()
+    for it in arr:
+        if not isinstance(it, dict):
+            continue
+        code = _extract_code(str(it.get("code") or ""))
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        name = str(it.get("name") or "").strip()
+        try:
+            amount = float(it.get("amount") or 0)
+        except Exception:
+            amount = 0
+        if (not math.isfinite(amount)) or amount <= 0:
+            continue
+        out.append({"code": code, "name": name, "amount": amount})
+    return out
+
+
 def ai_extract_holdings_from_ocr_lines(
     lines: List[str],
     *,
     endpoint: str,
     api_key: str,
     model: str,
+    enable_json_repair: bool = True,
+    repair_rounds: int = 1,
 ) -> List[Dict]:
     ep = _normalize_ai_endpoint(endpoint)
     key = api_key.strip()
@@ -158,35 +279,14 @@ def ai_extract_holdings_from_ocr_lines(
         content = str(data.get("choices", [])[0].get("message", {}).get("content", ""))
     except Exception:
         content = ""
-    if not content:
-        raise RuntimeError("AI未返回可解析内容")
-
-    arr_text = _extract_json_array(content) or content.strip()
-    try:
-        arr = json.loads(arr_text)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("AI返回不是有效JSON数组") from exc
-    if not isinstance(arr, list):
-        raise RuntimeError("AI返回结构异常")
-
-    out: List[Dict] = []
-    seen = set()
-    for it in arr:
-        if not isinstance(it, dict):
-            continue
-        code = _extract_code(str(it.get("code") or ""))
-        if not code or code in seen:
-            continue
-        seen.add(code)
-        name = str(it.get("name") or "").strip()
-        try:
-            amount = float(it.get("amount") or 0)
-        except Exception:
-            amount = 0
-        if (not math.isfinite(amount)) or amount <= 0:
-            continue
-        out.append({"code": code, "name": name, "amount": amount})
-    return out
+    return _parse_ai_holdings_content(
+        content,
+        endpoint=ep,
+        api_key=key,
+        model=m,
+        enable_json_repair=enable_json_repair,
+        repair_rounds=repair_rounds,
+    )
 
 
 def ai_extract_holdings_from_image_base64(
@@ -196,6 +296,8 @@ def ai_extract_holdings_from_image_base64(
     api_key: str,
     model: str,
     file_ext: str = "jpg",
+    enable_json_repair: bool = True,
+    repair_rounds: int = 1,
 ) -> List[Dict]:
     ep = _normalize_ai_endpoint(endpoint)
     key = api_key.strip()
@@ -252,35 +354,14 @@ def ai_extract_holdings_from_image_base64(
         content = str(data.get("choices", [])[0].get("message", {}).get("content", ""))
     except Exception:
         content = ""
-    if not content:
-        raise RuntimeError("AI未返回可解析内容")
-
-    arr_text = _extract_json_array(content) or content.strip()
-    try:
-        arr = json.loads(arr_text)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("AI返回不是有效JSON数组") from exc
-    if not isinstance(arr, list):
-        raise RuntimeError("AI返回结构异常")
-
-    out: List[Dict] = []
-    seen = set()
-    for it in arr:
-        if not isinstance(it, dict):
-            continue
-        code = _extract_code(str(it.get("code") or ""))
-        if not code or code in seen:
-            continue
-        seen.add(code)
-        name = str(it.get("name") or "").strip()
-        try:
-            amount = float(it.get("amount") or 0)
-        except Exception:
-            amount = 0
-        if (not math.isfinite(amount)) or amount <= 0:
-            continue
-        out.append({"code": code, "name": name, "amount": amount})
-    return out
+    return _parse_ai_holdings_content(
+        content,
+        endpoint=ep,
+        api_key=key,
+        model=m,
+        enable_json_repair=enable_json_repair,
+        repair_rounds=repair_rounds,
+    )
 
 
 def ocr_lines_from_image_bytes(content: bytes, suffix: str = ".jpg") -> List[str]:
