@@ -1,4 +1,5 @@
 from typing import List
+import math
 
 from fastapi import Body, FastAPI, File, Header, Query, UploadFile
 import base64
@@ -51,6 +52,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _normalize_import_items(raw_items: list[dict]) -> list[HoldingImportItem]:
+    out: list[HoldingImportItem] = []
+    seen: set[str] = set()
+    for it in raw_items or []:
+        try:
+            code = f"{(it or {}).get('code') or ''}".strip()
+            if not code or code in seen:
+                continue
+            name = f"{(it or {}).get('name') or ''}".strip()
+            amount = float((it or {}).get('amount') or 0)
+            if (not math.isfinite(amount)) or amount <= 0:
+                continue
+            seen.add(code)
+            out.append(HoldingImportItem(code=code, name=name, amount=amount))
+        except Exception:
+            continue
+    return out
 
 
 @app.on_event("startup")
@@ -280,13 +300,16 @@ async def fund_catalog():
 
 @app.post("/api/holdings/import-image", response_model=HoldingImportResponse)
 async def import_holdings_image(file: UploadFile = File(...)):
-    content = await file.read()
-    suffix = ".jpg"
-    if file.filename and "." in file.filename:
-        suffix = "." + file.filename.split(".")[-1]
-    items = ocr_holdings_from_image_bytes(content, suffix=suffix)
-    out = [HoldingImportItem(**it) for it in items]
-    return HoldingImportResponse(items=out)
+    try:
+        content = await file.read()
+        suffix = ".jpg"
+        if file.filename and "." in file.filename:
+            suffix = "." + file.filename.split(".")[-1]
+        items = ocr_holdings_from_image_bytes(content, suffix=suffix)
+        out = _normalize_import_items(items)
+        return HoldingImportResponse(ok=True, message="", items=out)
+    except Exception as e:  # noqa: BLE001
+        return HoldingImportResponse(ok=False, message=f"图片导入失败: {e}", items=[])
 
 
 @app.post("/api/holdings/import-image-base64", response_model=HoldingImportResponse)
@@ -296,37 +319,40 @@ async def import_holdings_image_base64(
     x_mw_ai_key: str | None = Header(None),
     x_mw_ai_model: str | None = Header(None),
 ):
-    ext = (payload.fileExt or "jpg").strip().lower().replace(".", "")
-    if not ext:
-        ext = "jpg"
-    raw = payload.imageBase64 or ""
-    if "," in raw and "base64" in raw[:40]:
-        raw = raw.split(",", 1)[1]
     try:
-        content = base64.b64decode(raw)
-    except Exception as exc:  # noqa: BLE001
-        raise ValueError("imageBase64 不是有效的 base64") from exc
-
-    lines = ocr_lines_from_image_bytes(content, suffix=f".{ext}")
-    items = []
-    if payload.useAi and (x_mw_ai_endpoint or "").strip() and (x_mw_ai_key or "").strip():
+        ext = (payload.fileExt or "jpg").strip().lower().replace(".", "")
+        if not ext:
+            ext = "jpg"
+        raw = payload.imageBase64 or ""
+        if "," in raw and "base64" in raw[:40]:
+            raw = raw.split(",", 1)[1]
         try:
-            items = ai_extract_holdings_from_ocr_lines(
-                lines,
-                endpoint=(x_mw_ai_endpoint or "").strip(),
-                api_key=(x_mw_ai_key or "").strip(),
-                model=(x_mw_ai_model or "gpt-4o-mini").strip(),
-            )
+            content = base64.b64decode(raw)
         except Exception:
-            items = []
+            return HoldingImportResponse(ok=False, message="imageBase64 不是有效的 base64", items=[])
 
-    if not items:
-        from .importer import parse_holdings_from_ocr_lines
+        lines = ocr_lines_from_image_bytes(content, suffix=f".{ext}")
+        items = []
+        if payload.useAi and (x_mw_ai_endpoint or "").strip() and (x_mw_ai_key or "").strip():
+            try:
+                items = ai_extract_holdings_from_ocr_lines(
+                    lines,
+                    endpoint=(x_mw_ai_endpoint or "").strip(),
+                    api_key=(x_mw_ai_key or "").strip(),
+                    model=(x_mw_ai_model or "gpt-4o-mini").strip(),
+                )
+            except Exception:
+                items = []
 
-        items = parse_holdings_from_ocr_lines(lines)
+        if not items:
+            from .importer import parse_holdings_from_ocr_lines
 
-    out = [HoldingImportItem(**it) for it in items]
-    return HoldingImportResponse(items=out)
+            items = parse_holdings_from_ocr_lines(lines)
+
+        out = _normalize_import_items(items)
+        return HoldingImportResponse(ok=True, message="", items=out)
+    except Exception as e:  # noqa: BLE001
+        return HoldingImportResponse(ok=False, message=f"图片导入失败: {e}", items=[])
 
 
 @app.get("/api/data/ai-verify", response_model=AiVerifyResponse)

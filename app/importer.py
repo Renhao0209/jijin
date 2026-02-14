@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import tempfile
 from pathlib import Path
@@ -18,7 +19,7 @@ def _extract_amount(text: str) -> float | None:
         v = float(m.group(1))
     except Exception:
         return None
-    if v <= 0:
+    if not math.isfinite(v) or v <= 0:
         return None
     return v
 
@@ -151,7 +152,7 @@ def ai_extract_holdings_from_ocr_lines(
             amount = float(it.get("amount") or 0)
         except Exception:
             amount = 0
-        if amount <= 0:
+        if (not math.isfinite(amount)) or amount <= 0:
             continue
         out.append({"code": code, "name": name, "amount": amount})
     return out

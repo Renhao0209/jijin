@@ -113,6 +113,8 @@ class HoldingImportItem(BaseModel):
 
 
 class HoldingImportResponse(BaseModel):
+    ok: bool = True
+    message: str = ""
     items: List[HoldingImportItem]
 
 
