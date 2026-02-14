@@ -92,3 +92,36 @@ class CatalogItem(BaseModel):
     code: str
     name: str
     pinyin: str = ""
+
+
+class SourceVerifyRequest(BaseModel):
+    source: str
+    tushareToken: str = ""
+    xueqiuCookie: str = ""
+    akshareEnabled: bool = False
+
+
+class SourceVerifyResponse(BaseModel):
+    ok: bool
+    message: str = ""
+
+
+class HoldingImportItem(BaseModel):
+    code: str
+    name: str = ""
+    amount: float = 0
+
+
+class HoldingImportResponse(BaseModel):
+    items: List[HoldingImportItem]
+
+
+class HoldingImportImageBase64Request(BaseModel):
+    imageBase64: str
+    fileExt: str = "jpg"
+    useAi: bool = True
+
+
+class AiVerifyResponse(BaseModel):
+    ok: bool
+    message: str = ""

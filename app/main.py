@@ -1,6 +1,7 @@
 from typing import List
 
-from fastapi import Body, FastAPI, Query
+from fastapi import Body, FastAPI, File, Header, Query, UploadFile
+import base64
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import ALLOWED_ORIGINS
@@ -12,13 +13,20 @@ from .schemas import (
     EstimateItem,
     EstimateResponse,
     HoldingItem,
+    HoldingImportItem,
+    HoldingImportImageBase64Request,
+    HoldingImportResponse,
     HoldingProfitItem,
     HoldingProfitResponse,
     FuturesItem,
     MaLineResponse,
     SuggestItem,
     SourceInfo,
+    SourceVerifyRequest,
+    SourceVerifyResponse,
+    AiVerifyResponse,
 )
+from .importer import ai_extract_holdings_from_ocr_lines, ocr_holdings_from_image_bytes, ocr_lines_from_image_bytes
 from .config import TUSHARE_TOKEN, XUEQIU_COOKIE, JOINQUANT_TOKEN, RICEQUANT_TOKEN, AKSHARE_ENABLED
 from .services import (
     build_ma_line,
@@ -60,10 +68,18 @@ async def _shutdown() -> None:
 async def real_time_estimate(
     codes: str = Query(..., description="comma separated codes"),
     source: str | None = Query(None, description="optional source name"),
+    x_mw_xueqiu_cookie: str | None = Header(None),
+    x_mw_akshare_enabled: str | None = Header(None),
 ):
+    akshare_enabled = (x_mw_akshare_enabled or "").strip() in {"1", "true", "True"}
     items: List[EstimateItem] = []
     for code in [c.strip() for c in codes.split(",") if c.strip()]:
-        data = await fetch_estimate(code, source=source)
+        data = await fetch_estimate(
+            code,
+            source=source,
+            xueqiu_cookie=x_mw_xueqiu_cookie,
+            akshare_enabled=akshare_enabled,
+        )
         items.append(
             EstimateItem(
                 code=data.get("fundcode", code),
@@ -78,8 +94,12 @@ async def real_time_estimate(
 
 
 @app.get("/api/chart/pro-trend/{code}", response_model=ChartResponse)
-async def pro_trend(code: str):
-    data = await build_pro_trend(code)
+async def pro_trend(
+    code: str,
+    source: str | None = Query(None),
+    x_mw_tushare_token: str | None = Header(None),
+):
+    data = await build_pro_trend(code, source=source, tushare_token=x_mw_tushare_token)
     points = [ChartPoint(ts=ts, pct=0, nav=nav) for ts, nav in data["points"]]
     ma5 = [ChartPoint(ts=ts, pct=0, nav=nav) for ts, nav in data["ma5"]]
     ma10 = [ChartPoint(ts=ts, pct=0, nav=nav) for ts, nav in data["ma10"]]
@@ -87,14 +107,22 @@ async def pro_trend(code: str):
 
 
 @app.get("/api/history/ma-line/{code}", response_model=MaLineResponse)
-async def ma_line(code: str, source: str | None = Query(None)):
-    data = await build_ma_line(code)
+async def ma_line(
+    code: str,
+    source: str | None = Query(None),
+    x_mw_tushare_token: str | None = Header(None),
+):
+    data = await build_ma_line(code, source=source, tushare_token=x_mw_tushare_token)
     return MaLineResponse(code=code, **data)
 
 
 @app.get("/api/history/nav/{code}")
-async def nav_history(code: str, source: str | None = Query(None)):
-    raw = await fetch_nav_history(code, source=source)
+async def nav_history(
+    code: str,
+    source: str | None = Query(None),
+    x_mw_tushare_token: str | None = Header(None),
+):
+    raw = await fetch_nav_history(code, source=source, tushare_token=x_mw_tushare_token)
     out = []
     from datetime import datetime
 
@@ -108,13 +136,24 @@ async def nav_history(code: str, source: str | None = Query(None)):
 
 
 @app.post("/api/hold/profit", response_model=HoldingProfitResponse)
-async def hold_profit(items: List[HoldingItem] = Body(...)):
+async def hold_profit(
+    items: List[HoldingItem] = Body(...),
+    source: str | None = Query(None),
+    x_mw_xueqiu_cookie: str | None = Header(None),
+    x_mw_akshare_enabled: str | None = Header(None),
+):
+    akshare_enabled = (x_mw_akshare_enabled or "").strip() in {"1", "true", "True"}
     total_value = 0.0
     total_cost = 0.0
     out: List[HoldingProfitItem] = []
 
     for it in items:
-        est = await fetch_estimate(it.code)
+        est = await fetch_estimate(
+            it.code,
+            source=source,
+            xueqiu_cookie=x_mw_xueqiu_cookie,
+            akshare_enabled=akshare_enabled,
+        )
         result = compute_profit(est, it.model_dump())
         total_value += result["currentValue"]
         total_cost += result["totalCost"]
@@ -141,33 +180,73 @@ async def hold_profit(items: List[HoldingItem] = Body(...)):
 
 
 @app.get("/api/data/source-list", response_model=List[SourceInfo])
-async def source_list():
+async def source_list(
+    x_mw_tushare_token: str | None = Header(None),
+    x_mw_xueqiu_cookie: str | None = Header(None),
+    x_mw_akshare_enabled: str | None = Header(None),
+):
+    akshare_enabled = (x_mw_akshare_enabled or "").strip() in {"1", "true", "True"}
     sources = [
-        ("fundgz", 1, "实时估值"),
-        ("akshare", 2, "实时估值(可选)"),
-        ("tushare", 3, "历史净值"),
-        ("xueqiu", 4, "实时估值"),
-        ("eastmoney", 5, "历史净值"),
-        ("pingzhong", 6, "历史净值兜底"),
-        ("joinquant", 7, "历史净值(可选)"),
-        ("ricequant", 8, "历史净值(可选)"),
+        ("fundgz", 1, "实时估值（免 token）"),
+        ("xueqiu", 2, "实时估值（需 XUEQIU_COOKIE）"),
+        ("akshare", 3, "实时估值（可选：需 AKSHARE_ENABLED=1 且安装 akshare）"),
+        ("eastmoney", 4, "历史净值（免 token）"),
+        ("pingzhong", 5, "历史净值兜底（免 token）"),
+        ("tushare", 6, "历史净值（可选：需 TUSHARE_TOKEN）"),
+        ("joinquant", 7, "占位：未接入"),
+        ("ricequant", 8, "占位：未接入"),
     ]
     out: List[SourceInfo] = []
     for name, p, msg in sources:
+        implemented = name in {"fundgz", "eastmoney", "pingzhong", "xueqiu", "tushare", "akshare"}
         configured = True
-        if name == "tushare" and not TUSHARE_TOKEN:
+        if name == "tushare" and not ((x_mw_tushare_token or "").strip() or TUSHARE_TOKEN):
             configured = False
-        if name == "xueqiu" and not XUEQIU_COOKIE:
+        if name == "xueqiu" and not ((x_mw_xueqiu_cookie or "").strip() or XUEQIU_COOKIE):
             configured = False
-        if name == "akshare" and not AKSHARE_ENABLED:
+        if name == "akshare":
+            if not (AKSHARE_ENABLED or akshare_enabled):
+                configured = False
+            else:
+                try:
+                    import akshare  # type: ignore  # noqa: F401
+                except Exception:
+                    configured = False
+
+        # Placeholders: keep them visible but never mark ok.
+        if name in {"joinquant", "ricequant"}:
+            implemented = False
             configured = False
-        if name == "joinquant" and not JOINQUANT_TOKEN:
-            configured = False
-        if name == "ricequant" and not RICEQUANT_TOKEN:
-            configured = False
-        ok = configured and _breaker.allow(name)
+
+        ok = implemented and configured and _breaker.allow(name)
         out.append(SourceInfo(name=name, priority=p, ok=ok, message=msg))
     return out
+
+
+@app.post("/api/data/source-verify", response_model=SourceVerifyResponse)
+async def source_verify(payload: SourceVerifyRequest):
+    source = payload.source.strip().lower()
+    try:
+        if source == "xueqiu":
+            await fetch_estimate(
+                "110022",
+                source="xueqiu",
+                xueqiu_cookie=payload.xueqiuCookie,
+                akshare_enabled=False,
+            )
+        elif source == "tushare":
+            nav = await fetch_nav_history("110022", source="tushare", tushare_token=payload.tushareToken)
+            if not nav:
+                return SourceVerifyResponse(ok=False, message="tushare 无返回数据")
+        elif source == "akshare":
+            await fetch_estimate("159915", source="akshare", akshare_enabled=payload.akshareEnabled)
+        elif source in {"fundgz", "eastmoney", "pingzhong"}:
+            return SourceVerifyResponse(ok=True, message="免配置数据源")
+        else:
+            return SourceVerifyResponse(ok=False, message="不支持或未接入的数据源")
+    except Exception as e:  # noqa: BLE001
+        return SourceVerifyResponse(ok=False, message=str(e))
+    return SourceVerifyResponse(ok=True, message="验证通过")
 
 
 @app.get("/api/trade/status")
@@ -197,3 +276,90 @@ async def fund_suggest(query: str = Query(...)):
 async def fund_catalog():
     items = await fetch_fund_catalog()
     return [CatalogItem(**it) for it in items]
+
+
+@app.post("/api/holdings/import-image", response_model=HoldingImportResponse)
+async def import_holdings_image(file: UploadFile = File(...)):
+    content = await file.read()
+    suffix = ".jpg"
+    if file.filename and "." in file.filename:
+        suffix = "." + file.filename.split(".")[-1]
+    items = ocr_holdings_from_image_bytes(content, suffix=suffix)
+    out = [HoldingImportItem(**it) for it in items]
+    return HoldingImportResponse(items=out)
+
+
+@app.post("/api/holdings/import-image-base64", response_model=HoldingImportResponse)
+async def import_holdings_image_base64(
+    payload: HoldingImportImageBase64Request,
+    x_mw_ai_endpoint: str | None = Header(None),
+    x_mw_ai_key: str | None = Header(None),
+    x_mw_ai_model: str | None = Header(None),
+):
+    ext = (payload.fileExt or "jpg").strip().lower().replace(".", "")
+    if not ext:
+        ext = "jpg"
+    raw = payload.imageBase64 or ""
+    if "," in raw and "base64" in raw[:40]:
+        raw = raw.split(",", 1)[1]
+    try:
+        content = base64.b64decode(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("imageBase64 不是有效的 base64") from exc
+
+    lines = ocr_lines_from_image_bytes(content, suffix=f".{ext}")
+    items = []
+    if payload.useAi and (x_mw_ai_endpoint or "").strip() and (x_mw_ai_key or "").strip():
+        try:
+            items = ai_extract_holdings_from_ocr_lines(
+                lines,
+                endpoint=(x_mw_ai_endpoint or "").strip(),
+                api_key=(x_mw_ai_key or "").strip(),
+                model=(x_mw_ai_model or "gpt-4o-mini").strip(),
+            )
+        except Exception:
+            items = []
+
+    if not items:
+        from .importer import parse_holdings_from_ocr_lines
+
+        items = parse_holdings_from_ocr_lines(lines)
+
+    out = [HoldingImportItem(**it) for it in items]
+    return HoldingImportResponse(items=out)
+
+
+@app.get("/api/data/ai-verify", response_model=AiVerifyResponse)
+async def ai_verify(
+    x_mw_ai_endpoint: str | None = Header(None),
+    x_mw_ai_key: str | None = Header(None),
+    x_mw_ai_model: str | None = Header(None),
+):
+    ep = (x_mw_ai_endpoint or "").strip()
+    key = (x_mw_ai_key or "").strip()
+    model = (x_mw_ai_model or "gpt-4o-mini").strip()
+    if not ep or not key:
+        return AiVerifyResponse(ok=False, message="AI配置不完整")
+    try:
+        import httpx
+
+        body = {
+            "model": model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": "你是一个助手"},
+                {"role": "user", "content": "仅回复OK"},
+            ],
+            "max_tokens": 16,
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                ep,
+                json=body,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            )
+        if resp.status_code < 200 or resp.status_code >= 300:
+            return AiVerifyResponse(ok=False, message=f"AI接口错误: {resp.status_code}")
+    except Exception as e:  # noqa: BLE001
+        return AiVerifyResponse(ok=False, message=str(e))
+    return AiVerifyResponse(ok=True, message="AI配置可用")

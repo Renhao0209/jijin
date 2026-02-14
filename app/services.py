@@ -1,17 +1,39 @@
 from __future__ import annotations
 
 from datetime import datetime, time
+import hashlib
 from typing import Dict, List, Optional, Tuple
 
 import httpx
 
 from .cache import TTLCache
 from .config import CACHE_TTL_EST, CACHE_TTL_NAV
-from .sources import DataSourceError, build_sources
+from .sources import DataSourceError, build_sources, build_sources_with_overrides
 
 
 _sources = build_sources()
 _cache = TTLCache()
+
+
+def _cred_sig(s: str | None) -> str:
+    if not s:
+        return "none"
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:8]
+
+
+def _runtime_sources(
+    *,
+    xueqiu_cookie: str | None = None,
+    tushare_token: str | None = None,
+    akshare_enabled: bool | None = None,
+) -> Dict[str, object]:
+    if xueqiu_cookie is None and tushare_token is None and akshare_enabled is None:
+        return _sources
+    return build_sources_with_overrides(
+        xueqiu_cookie=xueqiu_cookie,
+        tushare_token=tushare_token,
+        akshare_enabled=akshare_enabled,
+    )
 
 
 class _CircuitBreaker:
@@ -72,15 +94,26 @@ def _calc_ma_series(points: List[Tuple[int, float]], window: int) -> List[Tuple[
     return out
 
 
-async def fetch_estimate(code: str, source: str | None = None) -> Dict:
+async def fetch_estimate(
+    code: str,
+    source: str | None = None,
+    *,
+    xueqiu_cookie: str | None = None,
+    akshare_enabled: bool | None = None,
+) -> Dict:
     src_name = source or "auto"
-    key = f"est::{src_name}::{code}"
+    key = f"est::{src_name}::{code}::{_cred_sig(xueqiu_cookie)}::{1 if akshare_enabled else 0}"
     cached = _cache.get(key)
     if cached:
         return cached
 
+    runtime_sources = _runtime_sources(
+        xueqiu_cookie=xueqiu_cookie,
+        akshare_enabled=akshare_enabled,
+    )
+
     est_sources = [
-        s for s in ["fundgz", "xueqiu", "akshare"] if s in _sources
+        s for s in ["fundgz", "xueqiu", "akshare"] if s in runtime_sources
     ]
 
     if source and source in est_sources:
@@ -90,7 +123,7 @@ async def fetch_estimate(code: str, source: str | None = None) -> Dict:
     for name in est_sources:
         if not _breaker.allow(name):
             continue
-        src = _sources.get(name)
+        src = runtime_sources.get(name)
         if src is None:
             continue
         try:
@@ -107,14 +140,21 @@ async def fetch_estimate(code: str, source: str | None = None) -> Dict:
     raise DataSourceError("no available estimate source")
 
 
-async def fetch_nav_history(code: str, source: str | None = None) -> List[Dict]:
-    key = f"nav::{code}"
+async def fetch_nav_history(
+    code: str,
+    source: str | None = None,
+    *,
+    tushare_token: str | None = None,
+) -> List[Dict]:
+    key = f"nav::{code}::{_cred_sig(tushare_token)}"
     cached = _cache.get(key)
     if cached:
         return cached
 
+    runtime_sources = _runtime_sources(tushare_token=tushare_token)
+
     nav_sources = [
-        s for s in ["eastmoney", "pingzhong", "tushare"] if s in _sources
+        s for s in ["eastmoney", "pingzhong", "tushare"] if s in runtime_sources
     ]
     if source and source in nav_sources:
         nav_sources = [source]
@@ -122,7 +162,7 @@ async def fetch_nav_history(code: str, source: str | None = None) -> List[Dict]:
     for name in nav_sources:
         if not _breaker.allow(name):
             continue
-        src = _sources.get(name)
+        src = runtime_sources.get(name)
         if src is None:
             continue
         try:
@@ -276,8 +316,8 @@ async def fetch_fund_catalog() -> List[Dict]:
     return out
 
 
-async def build_ma_line(code: str) -> Dict:
-    hist = await fetch_nav_history(code)
+async def build_ma_line(code: str, *, tushare_token: str | None = None, source: str | None = None) -> Dict:
+    hist = await fetch_nav_history(code, source=source, tushare_token=tushare_token)
     values = [float(it["nav"]) for it in hist if "nav" in it]
     return {
         "ma10": _ma(values, 10),
@@ -286,8 +326,8 @@ async def build_ma_line(code: str) -> Dict:
     }
 
 
-async def build_pro_trend(code: str) -> Dict:
-    hist = await fetch_nav_history(code)
+async def build_pro_trend(code: str, *, tushare_token: str | None = None, source: str | None = None) -> Dict:
+    hist = await fetch_nav_history(code, source=source, tushare_token=tushare_token)
     if not hist:
         return {"points": [], "ma5": [], "ma10": [], "last_nav": None}
 

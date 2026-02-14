@@ -186,16 +186,29 @@ class AkShareEstimateSource:
             raise DataSourceError("akshare fetch error") from exc
 
 
-def build_sources() -> Dict[str, object]:
+def build_sources_with_overrides(
+    *,
+    xueqiu_cookie: str | None = None,
+    tushare_token: str | None = None,
+    akshare_enabled: bool | None = None,
+) -> Dict[str, object]:
+    cookie = (xueqiu_cookie if xueqiu_cookie is not None else XUEQIU_COOKIE).strip()
+    token = (tushare_token if tushare_token is not None else TUSHARE_TOKEN).strip()
+    ak_enabled = AKSHARE_ENABLED if akshare_enabled is None else akshare_enabled
+
     sources: Dict[str, object] = {
         "fundgz": FundGzSource(),
         "eastmoney": EastmoneyNavSource(),
         "pingzhong": PingZhongSource(),
     }
-    if XUEQIU_COOKIE:
-        sources["xueqiu"] = XueqiuEstimateSource(XUEQIU_COOKIE)
-    if TUSHARE_TOKEN:
-        sources["tushare"] = TushareNavSource(TUSHARE_TOKEN)
-    if AKSHARE_ENABLED:
+    if cookie:
+        sources["xueqiu"] = XueqiuEstimateSource(cookie)
+    if token:
+        sources["tushare"] = TushareNavSource(token)
+    if ak_enabled:
         sources["akshare"] = AkShareEstimateSource()
     return sources
+
+
+def build_sources() -> Dict[str, object]:
+    return build_sources_with_overrides()
