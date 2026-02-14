@@ -10,6 +10,37 @@ from typing import Dict, List
 import httpx
 
 
+def _normalize_ai_endpoint(endpoint: str) -> str:
+    ep = (endpoint or "").strip().rstrip("/")
+    if not ep:
+        return ""
+    if ep.endswith("/chat/completions"):
+        return ep
+    if ep.endswith("/v1"):
+        return f"{ep}/chat/completions"
+    return f"{ep}/v1/chat/completions"
+
+
+def _ai_error_message(resp: httpx.Response) -> str:
+    msg = ""
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            err = data.get("error")
+            if isinstance(err, dict):
+                msg = str(err.get("message") or err.get("type") or "").strip()
+            if not msg:
+                msg = str(data.get("message") or data.get("detail") or "").strip()
+    except Exception:
+        msg = ""
+    if not msg:
+        try:
+            msg = (resp.text or "").strip().replace("\n", " ")[:220]
+        except Exception:
+            msg = ""
+    return f"AI接口错误: {resp.status_code}" + (f" - {msg}" if msg else "")
+
+
 def _extract_amount(text: str) -> float | None:
     t = text.replace(",", "").replace("，", "")
     m = re.search(r"(?:¥|￥)?\s*(\d+(?:\.\d+)?)", t)
@@ -88,7 +119,7 @@ def ai_extract_holdings_from_ocr_lines(
     api_key: str,
     model: str,
 ) -> List[Dict]:
-    ep = endpoint.strip()
+    ep = _normalize_ai_endpoint(endpoint)
     key = api_key.strip()
     m = model.strip() or "gpt-4o-mini"
     if not ep or not key:
@@ -120,7 +151,7 @@ def ai_extract_holdings_from_ocr_lines(
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         )
     if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"AI接口错误: {resp.status_code}")
+        raise RuntimeError(_ai_error_message(resp))
     data = resp.json()
     content = ""
     try:
@@ -166,7 +197,7 @@ def ai_extract_holdings_from_image_base64(
     model: str,
     file_ext: str = "jpg",
 ) -> List[Dict]:
-    ep = endpoint.strip()
+    ep = _normalize_ai_endpoint(endpoint)
     key = api_key.strip()
     m = model.strip() or "gpt-4o-mini"
     if not ep or not key:
@@ -214,7 +245,7 @@ def ai_extract_holdings_from_image_base64(
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         )
     if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"AI接口错误: {resp.status_code}")
+        raise RuntimeError(_ai_error_message(resp))
     data = resp.json()
     content = ""
     try:

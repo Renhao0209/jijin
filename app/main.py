@@ -28,6 +28,8 @@ from .schemas import (
     AiVerifyResponse,
 )
 from .importer import (
+    _ai_error_message,
+    _normalize_ai_endpoint,
     ai_extract_holdings_from_image_base64,
     ai_extract_holdings_from_ocr_lines,
     ocr_holdings_from_image_bytes,
@@ -383,7 +385,7 @@ async def ai_verify(
     x_mw_ai_key: str | None = Header(None),
     x_mw_ai_model: str | None = Header(None),
 ):
-    ep = (x_mw_ai_endpoint or "").strip()
+    ep = _normalize_ai_endpoint((x_mw_ai_endpoint or "").strip())
     key = (x_mw_ai_key or "").strip()
     model = (x_mw_ai_model or "gpt-4o-mini").strip()
     if not ep or not key:
@@ -407,7 +409,7 @@ async def ai_verify(
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             )
         if resp.status_code < 200 or resp.status_code >= 300:
-            return AiVerifyResponse(ok=False, message=f"AI接口错误: {resp.status_code}")
+            return AiVerifyResponse(ok=False, message=_ai_error_message(resp))
     except Exception as e:  # noqa: BLE001
         return AiVerifyResponse(ok=False, message=str(e))
     return AiVerifyResponse(ok=True, message="AI配置可用")
